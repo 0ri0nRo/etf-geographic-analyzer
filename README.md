@@ -16,8 +16,10 @@ A Python tool for analyzing the geographic allocation of ETF holdings from CSV f
 ## 📋 Requirements
 
 ```
-pandas>=1.3.0
-numpy>=1.20.0
+pandas>=1.5.0
+numpy>=1.24.0
+matplotlib
+seaborn
 ```
 
 ## 🚀 Installation

@@ -4,18 +4,26 @@ import csv
 import os
 from io import StringIO
 from collections import defaultdict
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import seaborn as sns
+from datetime import datetime
+
+# Impostazioni per matplotlib
+plt.style.use('default')
+sns.set_palette("husl")
 
 def manual_csv_parsing(csv_file_path):
     """
-    Manual parsing for complex CSV formats
+    Manual parsing per formati CSV complessi con rimozione delle righe sopra l'header
     
     Args:
-        csv_file_path (str): Path to the CSV file
+        csv_file_path (str): Path al file CSV
     
     Returns:
-        pd.DataFrame: Parsed dataframe or None if failed
+        pd.DataFrame: DataFrame parsato o None se fallisce
     """
-    print("Attempting manual parsing...")
+    print("Tentativo di parsing manuale...")
     
     try:
         with open(csv_file_path, 'r', encoding='utf-8') as f:
@@ -25,44 +33,52 @@ def manual_csv_parsing(csv_file_path):
             with open(csv_file_path, 'r', encoding='latin-1') as f:
                 lines = f.readlines()
         except Exception as e:
-            print(f"Cannot read file even for manual parsing: {e}")
+            print(f"Impossibile leggere il file anche per il parsing manuale: {e}")
             return None
     
-    # Find header and data rows
+    # Trova l'header e le righe dati
     data_rows = []
     headers = None
+    header_line_index = -1
     
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
             
-        # Look for header row (contains "Ticker", "Weight", "Location" etc.)
+        # Cerca la riga header (contiene "Ticker", "Weight", "Location", etc.)
         if headers is None and any(keyword in line.lower() for keyword in ['ticker', 'weight', 'location', 'name', 'sector']):
             try:
-                # Smart split considering commas inside quotes
+                # Split intelligente considerando le virgole dentro le virgolette
                 reader = csv.reader(StringIO(line))
                 headers = next(reader)
-                print(f"Found headers: {headers}")
+                # Pulisci gli header da spazi extra
+                headers = [h.strip() for h in headers]
+                header_line_index = i
+                print(f"Header trovato alla riga {i+1}: {headers}")
                 continue
             except:
-                # Fallback: simple split
+                # Fallback: split semplice
                 headers = [col.strip() for col in line.split(',')]
+                header_line_index = i
                 continue
         
-        # If we found headers, try to parse data
-        if headers is not None:
+        # Se abbiamo trovato gli header, inizia a parsare i dati dalle righe successive
+        if headers is not None and i > header_line_index:
             try:
                 reader = csv.reader(StringIO(line))
                 row = next(reader)
-                if len(row) >= 3:  # At least 3 columns (ticker, weight, location)
+                if len(row) >= 3:  # Almeno 3 colonne (ticker, weight, location)
+                    # Assicurati che la riga abbia lo stesso numero di colonne degli header
+                    while len(row) < len(headers):
+                        row.append('')
                     data_rows.append(row[:len(headers)])
             except:
-                # Try simple split as fallback
+                # Prova split semplice come fallback
                 try:
                     row = [col.strip() for col in line.split(',')]
                     if len(row) >= 3:
-                        # Pad with empty strings if needed
+                        # Riempi con stringhe vuote se necessario
                         while len(row) < len(headers):
                             row.append('')
                         data_rows.append(row[:len(headers)])
@@ -71,86 +87,142 @@ def manual_csv_parsing(csv_file_path):
     
     if headers and data_rows:
         df = pd.DataFrame(data_rows, columns=headers)
-        print(f"✓ Manual parsing successful: {len(data_rows)} rows, {len(headers)} columns")
+        print(f"✓ Parsing manuale riuscito: {len(data_rows)} righe, {len(headers)} colonne")
         return df
     else:
-        print("✗ Manual parsing failed")
+        print("✗ Parsing manuale fallito")
+        return None
+
+def skip_csv_header_lines(csv_file_path, lines_to_skip=2):
+    """
+    Salta le prime N righe del CSV e restituisce un file temporaneo pulito
+    
+    Args:
+        csv_file_path (str): Path al file CSV originale
+        lines_to_skip (int): Numero di righe da saltare dall'inizio
+    
+    Returns:
+        str: Path del file temporaneo pulito o None se fallisce
+    """
+    try:
+        with open(csv_file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except:
+        try:
+            with open(csv_file_path, 'r', encoding='latin-1') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"Impossibile leggere il file per rimuovere le righe header: {e}")
+            return None
+    
+    # Rimuovi le prime N righe
+    cleaned_lines = lines[lines_to_skip:]
+    
+    # Crea file temporaneo
+    temp_file_path = csv_file_path.replace('.csv', '_temp_cleaned.csv')
+    
+    try:
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            f.writelines(cleaned_lines)
+        print(f"✓ Righe header rimosse. File temporaneo creato: {temp_file_path}")
+        return temp_file_path
+    except Exception as e:
+        print(f"Errore nella creazione del file temporaneo: {e}")
         return None
 
 def analyze_etf_country_allocation(csv_file_path):
     """
-    Analyze geographic allocation of an ETF from CSV file
+    Analizza l'allocazione geografica di un ETF da file CSV
     
     Args:
-        csv_file_path (str): Path to the CSV file
+        csv_file_path (str): Path al file CSV
     
     Returns:
         tuple: (country_weights, country_percentages, clean_dataframe) or None
     """
     
     df = None
+    temp_file_path = None
     
-    # Try multiple reading approaches
+    # Prima prova a rimuovere le prime due righe (Fund Holdings as of, riga vuota)
+    print("Rimozione delle prime due righe del CSV...")
+    temp_file_path = skip_csv_header_lines(csv_file_path, lines_to_skip=2)
+    
+    if temp_file_path:
+        csv_to_read = temp_file_path
+    else:
+        csv_to_read = csv_file_path
+        print("Impossibile creare file temporaneo, uso file originale")
+    
+    # Prova diversi approcci di lettura
     try:
-        print("Attempting to read CSV file...")
+        print("Tentativo di lettura file CSV...")
         
-        # Option 1: Standard CSV
+        # Opzione 1: CSV standard
         try:
-            df = pd.read_csv(csv_file_path, encoding='utf-8')
-            print("✓ Successfully read with comma separator")
+            df = pd.read_csv(csv_to_read, encoding='utf-8')
+            print("✓ Lettura riuscita con separatore virgola")
         except:
-            # Option 2: Semicolon separator
+            # Opzione 2: Separatore punto e virgola
             try:
-                df = pd.read_csv(csv_file_path, sep=';', encoding='utf-8')
-                print("✓ Successfully read with semicolon separator")
+                df = pd.read_csv(csv_to_read, sep=';', encoding='utf-8')
+                print("✓ Lettura riuscita con separatore punto e virgola")
             except:
-                # Option 3: Tab separator
+                # Opzione 3: Separatore tab
                 try:
-                    df = pd.read_csv(csv_file_path, sep='\t', encoding='utf-8')
-                    print("✓ Successfully read with tab separator")
+                    df = pd.read_csv(csv_to_read, sep='\t', encoding='utf-8')
+                    print("✓ Lettura riuscita con separatore tab")
                 except:
-                    # Option 4: Automatic separator detection
+                    # Opzione 4: Rilevamento automatico separatore
                     try:
-                        df = pd.read_csv(csv_file_path, sep=None, engine='python', encoding='utf-8')
-                        print("✓ Successfully read with automatic separator detection")
+                        df = pd.read_csv(csv_to_read, sep=None, engine='python', encoding='utf-8')
+                        print("✓ Lettura riuscita con rilevamento automatico separatore")
                     except:
-                        # Option 5: Latin encoding + automatic detection
+                        # Opzione 5: Encoding latin + rilevamento automatico
                         try:
-                            df = pd.read_csv(csv_file_path, sep=None, engine='python', encoding='latin-1')
-                            print("✓ Successfully read with latin-1 encoding")
+                            df = pd.read_csv(csv_to_read, sep=None, engine='python', encoding='latin-1')
+                            print("✓ Lettura riuscita con encoding latin-1")
                         except:
-                            # Try manual parsing as last resort
-                            print("All standard methods failed, trying manual parsing...")
+                            # Prova parsing manuale come ultima risorsa
+                            print("Tutti i metodi standard falliti, provo parsing manuale...")
                             df = manual_csv_parsing(csv_file_path)
                             if df is None:
                                 return None
                             
     except Exception as e:
-        print(f"General error reading file: {e}")
+        print(f"Errore generale nella lettura del file: {e}")
         return None
+    finally:
+        # Pulisci file temporaneo
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print("File temporaneo rimosso")
+            except:
+                print(f"Impossibile rimuovere file temporaneo: {temp_file_path}")
     
     if df is None:
         return None
         
-    # Print available columns for debugging
-    print("\nAvailable columns in CSV:")
+    # Stampa colonne disponibili per debug
+    print("\nColonne disponibili nel CSV:")
     print(df.columns.tolist())
-    print(f"\nDataFrame shape: {df.shape}")
-    print("\nFirst 3 rows:")
+    print(f"\nForma DataFrame: {df.shape}")
+    print("\nPrime 3 righe:")
     print(df.head(3))
     
-    # Automatically identify relevant columns
+    # Identifica automaticamente le colonne rilevanti
     weight_col = None
     location_col = None
     
-    # Search for weight column (weight/peso/%)
+    # Cerca colonna peso (weight/peso/%)
     for col in df.columns:
         col_lower = str(col).lower().strip()
         if any(keyword in col_lower for keyword in ['weight', 'peso', '%', 'percent', 'allocation']):
             weight_col = col
             break
     
-    # Search for location/country column
+    # Cerca colonna location/paese
     for col in df.columns:
         col_lower = str(col).lower().strip()
         if any(keyword in col_lower for keyword in ['location', 'country', 'paese', 'nazione', 'region']):
@@ -158,44 +230,44 @@ def analyze_etf_country_allocation(csv_file_path):
             break
     
     if weight_col is None or location_col is None:
-        print(f"\nWARNING: Cannot automatically identify columns.")
-        print(f"Weight column found: {weight_col}")
-        print(f"Location column found: {location_col}")
+        print(f"\nATTENZIONE: Impossibile identificare automaticamente le colonne.")
+        print(f"Colonna peso trovata: {weight_col}")
+        print(f"Colonna location trovata: {location_col}")
         
-        # Allow manual input
-        print("\nAvailable columns:")
+        # Permetti input manuale
+        print("\nColonne disponibili:")
         for i, col in enumerate(df.columns):
             print(f"{i}: {col}")
         
         try:
-            weight_idx = int(input("Enter weight column index: "))
-            location_idx = int(input("Enter location column index: "))
+            weight_idx = int(input("Inserisci indice colonna peso: "))
+            location_idx = int(input("Inserisci indice colonna location: "))
             
             weight_col = df.columns[weight_idx]
             location_col = df.columns[location_idx]
         except (ValueError, IndexError):
-            print("Invalid column selection")
+            print("Selezione colonne non valida")
             return None
     
-    print(f"\nUsing weight column: {weight_col}")
-    print(f"Using location column: {location_col}")
+    print(f"\nUso colonna peso: {weight_col}")
+    print(f"Uso colonna location: {location_col}")
     
-    # Clean the data
+    # Pulisci i dati
     df_clean = df.dropna(subset=[weight_col, location_col]).copy()
     
-    # Convert weights to numeric (handle % symbols and strings)
+    # Converti pesi in numerico (gestisci simboli % e stringhe)
     if df_clean[weight_col].dtype == 'object':
-        # Remove % symbols and convert
+        # Rimuovi simboli % e converti
         df_clean[weight_col] = df_clean[weight_col].astype(str).str.replace('%', '').str.replace(',', '.')
         df_clean[weight_col] = pd.to_numeric(df_clean[weight_col], errors='coerce')
     
-    # Remove rows with invalid weights
+    # Rimuovi righe con pesi non validi
     df_clean = df_clean.dropna(subset=[weight_col])
     
-    # Normalize country names
+    # Normalizza nomi paesi
     df_clean[location_col] = df_clean[location_col].astype(str).str.strip()
     
-    # Country mapping for similar names (extend as needed)
+    # Mapping paesi per nomi simili (estendi se necessario)
     country_mapping = {
         'Korea (South)': 'South Korea',
         'China': 'China',
@@ -210,26 +282,182 @@ def analyze_etf_country_allocation(csv_file_path):
         'United Kingdom': 'United Kingdom'
     }
     
-    # Apply mapping
+    # Applica mapping
     df_clean['Country_Normalized'] = df_clean[location_col].map(country_mapping).fillna(df_clean[location_col])
     
-    # Calculate percentages by country
+    # Calcola percentuali per paese
     country_weights = df_clean.groupby('Country_Normalized')[weight_col].sum().sort_values(ascending=False)
     
-    # Calculate percentages
+    # Calcola percentuali
     total_weight = country_weights.sum()
     country_percentages = (country_weights / total_weight * 100).round(2)
     
     return country_weights, country_percentages, df_clean
 
+def create_pdf_report(country_weights, country_percentages, df_clean, output_filename="etf_country_allocation_report.pdf"):
+    """
+    Crea un report PDF con grafico a torta e tabella
+    
+    Args:
+        country_weights: Serie pandas con i pesi per paese
+        country_percentages: Serie pandas con le percentuali per paese
+        df_clean: DataFrame pulito
+        output_filename: Nome del file PDF di output
+    """
+    
+    with PdfPages(output_filename) as pdf:
+        # Pagina 1: Grafico a torta
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 16))
+        
+        # Prepara i dati per il grafico a torta
+        # Raggruppa i paesi con meno del 2% in "Altri"
+        threshold = 2.0
+        main_countries = country_percentages[country_percentages >= threshold]
+        other_countries = country_percentages[country_percentages < threshold]
+        
+        if len(other_countries) > 0:
+            plot_data = main_countries.copy()
+            plot_data['Altri'] = other_countries.sum()
+        else:
+            plot_data = country_percentages.copy()
+        
+        # Grafico a torta
+        colors = plt.cm.Set3(np.linspace(0, 1, len(plot_data)))
+        wedges, texts, autotexts = ax1.pie(plot_data.values, 
+                                          labels=plot_data.index,
+                                          autopct='%1.1f%%',
+                                          startangle=90,
+                                          colors=colors)
+        
+        # Migliora la leggibilità
+        plt.setp(autotexts, size=8, weight="bold")
+        plt.setp(texts, size=9)
+        
+        ax1.set_title('Allocazione Geografica ETF', fontsize=16, fontweight='bold', pad=20)
+        
+        # Tabella dettagliata
+        ax2.axis('tight')
+        ax2.axis('off')
+        
+        # Prepara dati per la tabella
+        table_data = []
+        table_data.append(['Paese', 'Peso Totale', 'Percentuale'])
+        
+        for country in country_percentages.index:
+            weight = country_weights[country]
+            percentage = country_percentages[country]
+            table_data.append([country, f'{weight:.2f}', f'{percentage:.2f}%'])
+        
+        # Aggiungi riga totale
+        table_data.append(['TOTALE', f'{country_weights.sum():.2f}', f'{country_percentages.sum():.2f}%'])
+        
+        # Crea tabella
+        table = ax2.table(cellText=table_data[1:],
+                         colLabels=table_data[0],
+                         cellLoc='center',
+                         loc='center',
+                         colWidths=[0.4, 0.3, 0.3])
+        
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.5)
+        
+        # Stilizza l'header
+        for i in range(len(table_data[0])):
+            table[(0, i)].set_facecolor('#4472C4')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+        
+        # Stilizza le righe alternate
+        for i in range(1, len(table_data)):
+            for j in range(len(table_data[0])):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor('#F2F2F2')
+        
+        # Stilizza la riga totale
+        last_row = len(table_data) - 1
+        for j in range(len(table_data[0])):
+            table[(last_row, j)].set_facecolor('#D9E1F2')
+            table[(last_row, j)].set_text_props(weight='bold')
+        
+        ax2.set_title('Dettaglio Allocazione per Paese', fontsize=14, fontweight='bold', pad=20)
+        
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+        
+        # Pagina 2: Statistiche aggiuntive
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(11, 8))
+        
+        # Grafico a barre orizzontali - Top 10 paesi
+        top_10 = country_percentages.head(10)
+        bars = ax1.barh(range(len(top_10)), top_10.values)
+        ax1.set_yticks(range(len(top_10)))
+        ax1.set_yticklabels(top_10.index)
+        ax1.set_xlabel('Percentuale (%)')
+        ax1.set_title('Top 10 Paesi per Allocazione')
+        ax1.invert_yaxis()
+        
+        # Aggiungi valori sulle barre
+        for i, bar in enumerate(bars):
+            width = bar.get_width()
+            ax1.text(width + 0.1, bar.get_y() + bar.get_height()/2, 
+                    f'{width:.1f}%', ha='left', va='center', fontsize=8)
+        
+        # Istogramma distribuzione pesi
+        ax2.hist(country_percentages.values, bins=20, edgecolor='black', alpha=0.7)
+        ax2.set_xlabel('Percentuale (%)')
+        ax2.set_ylabel('Numero di Paesi')
+        ax2.set_title('Distribuzione delle Allocazioni')
+        
+        # Box plot
+        ax3.boxplot(country_percentages.values, vert=True)
+        ax3.set_ylabel('Percentuale (%)')
+        ax3.set_title('Box Plot delle Allocazioni')
+        ax3.set_xticklabels(['Tutti i Paesi'])
+        
+        # Statistiche testuali
+        ax4.axis('off')
+        stats_text = f"""
+STATISTICHE RIASSUNTIVE
+
+Totale holdings: {len(df_clean)}
+Numero di paesi: {len(country_percentages)}
+
+CONCENTRAZIONE:
+Top 3 paesi: {country_percentages.head(3).sum():.2f}%
+Top 5 paesi: {country_percentages.head(5).sum():.2f}%
+Top 10 paesi: {country_percentages.head(10).sum():.2f}%
+
+DISTRIBUZIONE:
+Media: {country_percentages.mean():.2f}%
+Mediana: {country_percentages.median():.2f}%
+Dev. Standard: {country_percentages.std():.2f}%
+
+ESTREMI:
+Max allocazione: {country_percentages.iloc[0]:.2f}% ({country_percentages.index[0]})
+Min allocazione: {country_percentages.iloc[-1]:.2f}% ({country_percentages.index[-1]})
+
+Report generato: {datetime.now().strftime("%d/%m/%Y %H:%M")}
+        """
+        
+        ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes, 
+                fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
+        
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+    
+    print(f"✓ Report PDF creato: {output_filename}")
+
 def print_results(country_weights, country_percentages):
-    """Print results in a readable format"""
+    """Stampa risultati in formato leggibile"""
     
     print("\n" + "="*60)
-    print("ETF GEOGRAPHIC ALLOCATION")
+    print("ALLOCAZIONE GEOGRAFICA ETF")
     print("="*60)
     
-    print(f"\n{'Country':<25} {'Total Weight':<15} {'Percentage':<15}")
+    print(f"\n{'Paese':<25} {'Peso Totale':<15} {'Percentuale':<15}")
     print("-" * 60)
     
     for country in country_percentages.index:
@@ -238,15 +466,15 @@ def print_results(country_weights, country_percentages):
         print(f"{country:<25} {weight:<15.2f} {percentage:<15.2f}%")
     
     print("-" * 60)
-    print(f"{'TOTAL':<25} {country_weights.sum():<15.2f} {country_percentages.sum():<15.2f}%")
+    print(f"{'TOTALE':<25} {country_weights.sum():<15.2f} {country_percentages.sum():<15.2f}%")
     
-    # Top 5 countries
-    print(f"\nTOP 5 COUNTRIES:")
+    # Top 5 paesi
+    print(f"\nTOP 5 PAESI:")
     for i, (country, percentage) in enumerate(country_percentages.head(5).items(), 1):
         print(f"{i}. {country}: {percentage:.2f}%")
 
 def export_results(country_weights, country_percentages, output_file="country_allocation.csv"):
-    """Export results to CSV"""
+    """Esporta risultati in CSV"""
     
     results_df = pd.DataFrame({
         'Country': country_percentages.index,
@@ -255,95 +483,79 @@ def export_results(country_weights, country_percentages, output_file="country_al
     }).sort_values('Percentage', ascending=False)
     
     results_df.to_csv(output_file, index=False, encoding='utf-8')
-    print(f"\nResults exported to: {output_file}")
+    print(f"\nRisultati esportati in: {output_file}")
     return results_df
 
-def quick_analysis(csv_file, weight_column, location_column):
-    """
-    Quick analysis if you already know the column names
-    
-    Args:
-        csv_file (str): Path to CSV file
-        weight_column (str): Name of weight column
-        location_column (str): Name of location column
-    
-    Returns:
-        pd.Series: Country percentages
-    """
-    df = pd.read_csv(csv_file)
-    
-    # Calculate percentages by country directly
-    country_allocation = df.groupby(location_column)[weight_column].sum().sort_values(ascending=False)
-    country_percentages = (country_allocation / country_allocation.sum() * 100).round(2)
-    
-    print("\nGEOGRAPHIC ALLOCATION (Quick Analysis):")
-    for country, percentage in country_percentages.items():
-        print(f"{country}: {percentage}%")
-    
-    return country_percentages
-
-# Main execution
+# Esecuzione principale
 if __name__ == "__main__":
-    # Replace with your CSV file path
-    csv_file = "eimi_holdings.csv"
+    # Sostituisci con il path del tuo file CSV
+    csv_file = "weqw_holdings.csv"
     
-    print("ETF Geographic Allocation Analysis Script")
+    print("Script di Analisi Allocazione Geografica ETF")
     print("=" * 50)
     
-    # Check if file exists, ask user if not
+    # Controlla se il file esiste, chiedi all'utente altrimenti
     if not os.path.exists(csv_file):
-        csv_file = input("Enter CSV file path: ").strip('"\'')
+        csv_file = input("Inserisci il path del file CSV: ").strip('"\'')
         if not os.path.exists(csv_file):
-            print(f"File not found: {csv_file}")
+            print(f"File non trovato: {csv_file}")
             exit(1)
     
-    print(f"Analyzing file: {csv_file}")
+    print(f"Analizzando file: {csv_file}")
     
-    # Analyze the file
+    # Analizza il file
     result = analyze_etf_country_allocation(csv_file)
     
     if result:
         country_weights, country_percentages, df_clean = result
         
-        # Print results
+        # Stampa risultati
         print_results(country_weights, country_percentages)
         
-        # Export results
+        # Esporta risultati CSV
         export_results(country_weights, country_percentages)
         
-        # Additional statistics
-        print(f"\nSTATISTICS:")
-        print(f"Total holdings: {len(df_clean)}")
-        print(f"Number of countries: {len(country_percentages)}")
-        print(f"Top 3 countries concentration: {country_percentages.head(3).sum():.2f}%")
-        print(f"Top 5 countries concentration: {country_percentages.head(5).sum():.2f}%")
+        # Crea report PDF
+        try:
+            create_pdf_report(country_weights, country_percentages, df_clean)
+            print("✓ Report PDF creato con successo!")
+        except Exception as e:
+            print(f"Errore nella creazione del PDF: {e}")
+            print("Assicurati di avere installato matplotlib: pip install matplotlib")
         
-        # Concentration analysis
+        # Statistiche aggiuntive
+        print(f"\nSTATISTICHE:")
+        print(f"Totale holdings: {len(df_clean)}")
+        print(f"Numero di paesi: {len(country_percentages)}")
+        print(f"Concentrazione top 3 paesi: {country_percentages.head(3).sum():.2f}%")
+        print(f"Concentrazione top 5 paesi: {country_percentages.head(5).sum():.2f}%")
+        
+        # Analisi concentrazione
         if len(country_percentages) > 1:
-            print(f"Most concentrated country: {country_percentages.iloc[0]:.2f}%")
-            print(f"Least concentrated country: {country_percentages.iloc[-1]:.2f}%")
+            print(f"Paese più concentrato: {country_percentages.iloc[0]:.2f}%")
+            print(f"Paese meno concentrato: {country_percentages.iloc[-1]:.2f}%")
         
     else:
         print("\n" + "="*60)
-        print("UNABLE TO ANALYZE FILE")
+        print("IMPOSSIBILE ANALIZZARE IL FILE")
         print("="*60)
-        print("Suggestions:")
-        print("1. Check that the file is a valid CSV")
-        print("2. Ensure it contains 'Weight' and 'Location' columns")
-        print("3. Try saving the file as UTF-8 CSV from Excel")
-        print("4. Check for special characters in headers")
-        print("5. Make sure the file path is correct")
+        print("Suggerimenti:")
+        print("1. Controlla che il file sia un CSV valido")
+        print("2. Assicurati che contenga colonne 'Weight' e 'Location'")
+        print("3. Prova a salvare il file come CSV UTF-8 da Excel")
+        print("4. Controlla caratteri speciali negli header")
+        print("5. Assicurati che il path del file sia corretto")
         
-        # Show file info for debugging
+        # Mostra info file per debug
         try:
             with open(csv_file, 'r') as f:
                 first_lines = [next(f) for _ in range(min(3, sum(1 for _ in f) + 1))]
-                print(f"\nFirst few lines of the file:")
+                print(f"\nPrime righe del file:")
                 for i, line in enumerate(first_lines, 1):
-                    print(f"Line {i}: {repr(line[:100])}")  # Show first 100 chars
+                    print(f"Riga {i}: {repr(line[:100])}")  # Mostra primi 100 caratteri
         except Exception as e:
-            print(f"Cannot even read file for debugging: {e}")
+            print(f"Impossibile leggere il file anche per debug: {e}")
 
 print("\n" + "="*60)
-print("Script completed!")
+print("Script completato!")
 print("="*60)
